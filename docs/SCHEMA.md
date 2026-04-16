@@ -117,7 +117,7 @@ type DecisionCondition = {
 
 ```ts
 type Action = {
-  type: string; // e.g., "function", "end_conversation", "tts_say", "summarize_context"
+  type: string; // e.g., "function", "end_conversation", "tts_say"
   handler?: string; // reference to the Python handler for "function"
   text?: string; // spoken text for "tts_say"
 };

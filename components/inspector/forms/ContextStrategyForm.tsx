@@ -89,7 +89,8 @@ export default function ContextStrategyForm({ contextStrategy, onChange }: Props
       {strategy === "RESET_WITH_SUMMARY" && (
         <div className="space-y-2">
           <p className="text-xs text-yellow-600 dark:text-yellow-500">
-            Deprecated in pipecat-flows 1.0. Use a Summarize Context pre-action instead.
+            Deprecated in pipecat-flows 1.0. Use built-in context summarization from the assistant
+            aggregator instead.
           </p>
           <label htmlFor={summaryPromptId} className="text-xs opacity-60">
             Summary Prompt
