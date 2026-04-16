@@ -322,6 +322,7 @@ export default function InspectorPanel({
               label="Post Actions"
               actions={data?.post_actions}
               onChange={(actions) => update({ post_actions: actions })}
+              allowSummarizeContext={false}
             />
           </div>
         </TabsContent>

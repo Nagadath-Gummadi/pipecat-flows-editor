@@ -20,9 +20,16 @@ interface ActionItemProps {
   index: number;
   onUpdate: (updates: Partial<ActionJson>) => void;
   onRemove: () => void;
+  allowSummarizeContext?: boolean;
 }
 
-export function ActionItem({ action, index, onUpdate, onRemove }: ActionItemProps) {
+export function ActionItem({
+  action,
+  index,
+  onUpdate,
+  onRemove,
+  allowSummarizeContext = true,
+}: ActionItemProps) {
   const actionTypeId = useId();
   const actionHandlerId = useId();
   const actionTextId = useId();
@@ -41,6 +48,9 @@ export function ActionItem({ action, index, onUpdate, onRemove }: ActionItemProp
             <SelectItem value="function">Function</SelectItem>
             <SelectItem value="end_conversation">End Conversation</SelectItem>
             <SelectItem value="tts_say">TTS Say</SelectItem>
+            {allowSummarizeContext && (
+              <SelectItem value="summarize_context">Summarize Context</SelectItem>
+            )}
           </SelectContent>
         </Select>
       </div>

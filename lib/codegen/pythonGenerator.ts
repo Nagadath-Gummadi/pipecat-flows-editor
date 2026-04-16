@@ -1,4 +1,5 @@
 import type {
+  ActionJson,
   FlowFunctionJson,
   FlowJson,
   FlowNodeJson,
@@ -66,6 +67,19 @@ function formatProperty(prop: any, indent: string = "            "): string {
   if (prop.maximum !== undefined) parts.push(`"maximum": ${prop.maximum}`);
   if (prop.pattern) parts.push(`"pattern": "${escapePythonString(prop.pattern)}"`);
   return `{\n${indent}    ${parts.join(`,\n${indent}    `)}\n${indent}}`;
+}
+
+function formatAction(action: { type: string; handler?: string; text?: string }): string {
+  if (action.type === "end_conversation") {
+    return `            {"type": "end_conversation"}`;
+  } else if (action.type === "summarize_context") {
+    return `            {"type": "function", "handler": summarize_context}`;
+  } else if (action.type === "function" && action.handler) {
+    return `            {"type": "function", "handler": ${action.handler}}`;
+  } else if (action.type === "tts_say" && action.text) {
+    return `            {"type": "tts_say", "text": "${escapePythonString(action.text)}"}`;
+  }
+  return `            {"type": "${action.type}"}`;
 }
 
 function generateFunction(func: FlowFunctionJson): {
@@ -232,7 +246,7 @@ function generateNodeFunction(node: FlowNodeJson): { nodeCode: string; typeDefs:
   const preActions = data.pre_actions || [];
   const postActions = data.post_actions || [];
   const contextStrategy = data.context_strategy as
-    | { strategy: "APPEND" | "RESET" | "RESET_WITH_SUMMARY"; summary_prompt?: string }
+    | { strategy: "APPEND" | "RESET" | "RESET_WITH_SUMMARY"; summary_prompt?: string } // RESET_WITH_SUMMARY deprecated in 1.0
     | undefined;
 
   let code = `def create_${nodeId}_node() -> NodeConfig:
@@ -278,30 +292,12 @@ function generateNodeFunction(node: FlowNodeJson): { nodeCode: string; typeDefs:
   }
 
   if (preActions.length > 0) {
-    const actionStrs = preActions.map((action) => {
-      if (action.type === "end_conversation") {
-        return `            {"type": "end_conversation"}`;
-      } else if (action.type === "function" && action.handler) {
-        return `            {"type": "function", "handler": ${action.handler}}`;
-      } else if (action.type === "tts_say" && action.text) {
-        return `            {"type": "tts_say", "text": "${escapePythonString(action.text)}"}`;
-      }
-      return `            {"type": "${action.type}"}`;
-    });
+    const actionStrs = preActions.map(formatAction);
     code += `        pre_actions=[\n${actionStrs.join(",\n")}\n        ],\n`;
   }
 
   if (postActions.length > 0) {
-    const actionStrs = postActions.map((action) => {
-      if (action.type === "end_conversation") {
-        return `            {"type": "end_conversation"}`;
-      } else if (action.type === "function" && action.handler) {
-        return `            {"type": "function", "handler": ${action.handler}}`;
-      } else if (action.type === "tts_say" && action.text) {
-        return `            {"type": "tts_say", "text": "${escapePythonString(action.text)}"}`;
-      }
-      return `            {"type": "${action.type}"}`;
-    });
+    const actionStrs = postActions.map(formatAction);
     code += `        post_actions=[\n${actionStrs.join(",\n")}\n        ],\n`;
   }
 
@@ -407,6 +403,11 @@ ${func.name}_func = FlowsFunctionSchema(
   return code;
 }
 
+function nodePreActionsIncludeType(node: FlowNodeJson, actionType: string): boolean {
+  const preActions = (node.data?.pre_actions as ActionJson[] | undefined) || [];
+  return preActions.some((a) => a.type === actionType);
+}
+
 export function generatePythonCode(flow: FlowJson): string {
   // Check if any node uses context_strategy
   const hasContextStrategy = flow.nodes.some(
@@ -418,6 +419,11 @@ export function generatePythonCode(flow: FlowJson): string {
     const functions = (node.data?.functions as FlowFunctionJson[] | undefined) || [];
     return functions.some((func) => func.decision !== undefined);
   });
+
+  // Check if any node uses summarize_context action
+  const hasSummarizeContext = flow.nodes.some((node) =>
+    nodePreActionsIncludeType(node, "summarize_context")
+  );
 
   const nodes = flow.nodes || [];
   const initialNode = nodes.find((n) => n.type === "initial");
@@ -451,7 +457,7 @@ This file was generated from the visual flow editor.
 Customize the function handlers to implement your flow logic.
 """
 
-${hasDecision ? "from typing import Any\n\n" : ""}from pipecat_flows import (
+${hasDecision ? "from typing import Any\n\n" : ""}${hasSummarizeContext ? "from pipecat.frames.frames import LLMSummarizeContextFrame\n" : ""}from pipecat_flows import (
     FlowArgs,
     FlowManager,
     FlowResult,
@@ -461,7 +467,16 @@ ${hasDecision ? "from typing import Any\n\n" : ""}from pipecat_flows import (
 
 # Type definitions
 ${Array.from(allTypeDefs).join("\n")}
+${
+  hasSummarizeContext
+    ? `
+async def summarize_context(action: dict, flow_manager: FlowManager):
+    """Summarize conversation context. Replaces deprecated RESET_WITH_SUMMARY strategy."""
+    await flow_manager.llm.queue_frame(LLMSummarizeContextFrame())
 
+`
+    : ""
+}
 ${generateGlobalFunctions(flow)}
 
 # Node creation functions

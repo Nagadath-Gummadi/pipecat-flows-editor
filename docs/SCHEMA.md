@@ -55,11 +55,11 @@ type CommonNodeData = {
 ```
 
 - `label` – Display name used in the canvas/palette
-- `role_messages` – Pipecat role messages (`role` = `system` | `user` | `assistant`, `content` = string)
+- `role_messages` – Pipecat role messages (`role` = `system` | `developer` | `user` | `assistant`, `content` = string)
 - `task_messages` – Step-specific instructions
 - `functions` – Available `FlowsFunctionSchema` entries for this node
 - `pre_actions` / `post_actions` – Pipecat actions executed before/after the node
-- `context_strategy` – Controls Pipecat context accumulation (`APPEND`, `RESET`, `RESET_WITH_SUMMARY`)
+- `context_strategy` – Controls Pipecat context accumulation (`APPEND`, `RESET`, `RESET_WITH_SUMMARY` (deprecated))
 - `respond_immediately` – Set to `false` if the node should wait before responding
 
 ### Functions
@@ -117,7 +117,7 @@ type DecisionCondition = {
 
 ```ts
 type Action = {
-  type: string; // e.g., "function", "end_conversation", "tts_say"
+  type: string; // e.g., "function", "end_conversation", "tts_say", "summarize_context"
   handler?: string; // reference to the Python handler for "function"
   text?: string; // spoken text for "tts_say"
 };
@@ -127,8 +127,8 @@ type Action = {
 
 ```ts
 type ContextStrategyConfig = {
-  strategy: "APPEND" | "RESET" | "RESET_WITH_SUMMARY";
-  summary_prompt?: string; // only for RESET_WITH_SUMMARY
+  strategy: "APPEND" | "RESET" | "RESET_WITH_SUMMARY"; // RESET_WITH_SUMMARY deprecated in pipecat-flows 1.0
+  summary_prompt?: string; // only for RESET_WITH_SUMMARY (deprecated)
 };
 ```
 

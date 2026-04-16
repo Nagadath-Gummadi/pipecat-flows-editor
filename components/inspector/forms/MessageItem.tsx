@@ -35,13 +35,16 @@ export function MessageItem({ message, index, onUpdate, onRemove }: MessageItemP
           </label>
           <Select
             value={message.role}
-            onValueChange={(v: "system" | "user" | "assistant") => onUpdate({ role: v })}
+            onValueChange={(v: "system" | "user" | "assistant" | "developer") =>
+              onUpdate({ role: v })
+            }
           >
             <SelectTrigger id={messageRoleId} className="h-8 text-xs w-32">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="system">System</SelectItem>
+              <SelectItem value="developer">Developer</SelectItem>
               <SelectItem value="user">User</SelectItem>
               <SelectItem value="assistant">Assistant</SelectItem>
             </SelectContent>

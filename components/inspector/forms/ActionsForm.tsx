@@ -11,9 +11,15 @@ type Props = {
   label: string;
   actions: ActionJson[] | undefined;
   onChange: (actions: ActionJson[]) => void;
+  allowSummarizeContext?: boolean;
 };
 
-export default function ActionsForm({ label, actions, onChange }: Props) {
+export default function ActionsForm({
+  label,
+  actions,
+  onChange,
+  allowSummarizeContext = true,
+}: Props) {
   const items = actions ?? [];
 
   const updateItem = (index: number, updates: Partial<ActionJson>) => {
@@ -46,6 +52,7 @@ export default function ActionsForm({ label, actions, onChange }: Props) {
           index={i}
           onUpdate={(updates) => updateItem(i, updates)}
           onRemove={() => removeItem(i)}
+          allowSummarizeContext={allowSummarizeContext}
         />
       ))}
       {items.length === 0 && (
