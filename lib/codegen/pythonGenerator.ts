@@ -232,7 +232,7 @@ function generateNodeFunction(node: FlowNodeJson): { nodeCode: string; typeDefs:
   const preActions = data.pre_actions || [];
   const postActions = data.post_actions || [];
   const contextStrategy = data.context_strategy as
-    | { strategy: "APPEND" | "RESET" | "RESET_WITH_SUMMARY"; summary_prompt?: string }
+    | { strategy: "APPEND" | "RESET" | "RESET_WITH_SUMMARY"; summary_prompt?: string } // RESET_WITH_SUMMARY deprecated in 1.0
     | undefined;
 
   let code = `def create_${nodeId}_node() -> NodeConfig:

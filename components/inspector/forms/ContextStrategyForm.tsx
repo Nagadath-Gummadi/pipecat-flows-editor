@@ -83,11 +83,15 @@ export default function ContextStrategyForm({ contextStrategy, onChange }: Props
         <SelectContent>
           <SelectItem value="APPEND">APPEND (default)</SelectItem>
           <SelectItem value="RESET">RESET</SelectItem>
-          <SelectItem value="RESET_WITH_SUMMARY">RESET_WITH_SUMMARY</SelectItem>
+          <SelectItem value="RESET_WITH_SUMMARY">RESET_WITH_SUMMARY (deprecated)</SelectItem>
         </SelectContent>
       </Select>
       {strategy === "RESET_WITH_SUMMARY" && (
         <div className="space-y-2">
+          <p className="text-xs text-yellow-600 dark:text-yellow-500">
+            Deprecated in pipecat-flows 1.0. Use built-in context summarization from the assistant
+            aggregator instead.
+          </p>
           <label htmlFor={summaryPromptId} className="text-xs opacity-60">
             Summary Prompt
           </label>

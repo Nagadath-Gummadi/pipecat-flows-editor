@@ -12,7 +12,12 @@ export const Position = Type.Object({ x: Type.Number(), y: Type.Number() });
 
 // Message object (role + content) for Pipecat NodeConfig
 export const Message = Type.Object({
-  role: Type.Union([Type.Literal("system"), Type.Literal("user"), Type.Literal("assistant")]),
+  role: Type.Union([
+    Type.Literal("system"),
+    Type.Literal("user"),
+    Type.Literal("assistant"),
+    Type.Literal("developer"),
+  ]),
   content: Type.String(),
 });
 
@@ -73,9 +78,9 @@ export const ContextStrategyConfig = Type.Object({
   strategy: Type.Union([
     Type.Literal("APPEND"),
     Type.Literal("RESET"),
-    Type.Literal("RESET_WITH_SUMMARY"),
+    Type.Literal("RESET_WITH_SUMMARY"), // Deprecated in pipecat-flows 1.0, removed in 2.0
   ]),
-  summary_prompt: Type.Optional(Type.String()), // Only relevant for RESET_WITH_SUMMARY
+  summary_prompt: Type.Optional(Type.String()), // Only relevant for RESET_WITH_SUMMARY (deprecated)
 });
 
 // Common node data structure matching Pipecat NodeConfig
