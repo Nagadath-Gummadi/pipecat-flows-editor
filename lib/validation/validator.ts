@@ -22,6 +22,18 @@ export function validateFlowJson(json: unknown): ValidationResult {
   return { valid: Boolean(isValid), errors: validateFlow.errors };
 }
 
+// Deterministic stringify (object keys sorted) so two structurally identical
+// definitions compare equal regardless of property order.
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const obj = value as Record<string, unknown>;
+  return `{${Object.keys(obj)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
+    .join(",")}}`;
+}
+
 export function customGraphChecks(flow: FlowJson): ErrorObject[] {
   const errors: ErrorObject[] = [];
   // Unique node ids
@@ -60,5 +72,34 @@ export function customGraphChecks(flow: FlowJson): ErrorObject[] {
       } as ErrorObject);
     }
   });
+
+  // Functions that share a name must share a definition. Code generation emits a
+  // single Python `async def` per name (the same function can legitimately be
+  // referenced from multiple nodes), so two same-named functions with differing
+  // definitions would silently drop the later one.
+  const fnSignatures = new Map<string, string>();
+  const checkFunction = (fn: unknown, instancePath: string) => {
+    const name = (fn as { name?: string })?.name;
+    if (!name) return;
+    const signature = stableStringify(fn);
+    const existing = fnSignatures.get(name);
+    if (existing === undefined) {
+      fnSignatures.set(name, signature);
+    } else if (existing !== signature) {
+      errors.push({
+        instancePath,
+        schemaPath: "#/uniqueFunctionName",
+        keyword: "uniqueFunctionName",
+        params: { name },
+        message: `Conflicting definitions for function "${name}": functions sharing a name must be identical`,
+      } as ErrorObject);
+    }
+  };
+  (flow.global_functions ?? []).forEach((fn, i) => checkFunction(fn, `/global_functions/${i}`));
+  flow.nodes.forEach((n) => {
+    const functions = (n.data?.functions as unknown[] | undefined) ?? [];
+    functions.forEach((fn, i) => checkFunction(fn, `/nodes/${n.id}/functions/${i}`));
+  });
+
   return errors;
 }
