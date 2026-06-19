@@ -20,4 +20,17 @@ describe("validator", () => {
     const custom = customGraphChecks(dup as FlowJson);
     expect(custom.some((e) => String(e.message).includes("Duplicate node id"))).toBe(true);
   });
+
+  it("accepts a positive function timeout_secs but rejects non-positive ones", () => {
+    const withTimeout = (secs: number) => {
+      const flow = JSON.parse(JSON.stringify(minimal));
+      flow.nodes[0].data.functions = [
+        { name: "do_work", description: "Do work.", timeout_secs: secs },
+      ];
+      return flow;
+    };
+    expect(validateFlowJson(withTimeout(30)).valid).toBe(true);
+    expect(validateFlowJson(withTimeout(0)).valid).toBe(false);
+    expect(validateFlowJson(withTimeout(-5)).valid).toBe(false);
+  });
 });

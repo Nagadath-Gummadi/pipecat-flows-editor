@@ -2,11 +2,49 @@ import type {
   FlowFunctionJson,
   FlowJson,
   FlowNodeJson,
+  GlobalFunctionJson,
   MessageJson,
 } from "@/lib/schema/flow.schema";
 
+const INDENT = "    ";
+
+type AnyFunction = FlowFunctionJson | GlobalFunctionJson;
+
 function escapePythonString(str: string): string {
   return str.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
+}
+
+// Escape triple-quote sequences so user-provided text can't prematurely close a
+// """...""" docstring.
+function escapeTripleQuotes(str: string): string {
+  return str.replace(/"""/g, '\\"\\"\\"');
+}
+
+// Render a string as a Python literal: triple-quoted when it spans multiple
+// lines, otherwise a regular double-quoted string.
+function pythonStringLiteral(content: string): string {
+  if (content.includes("\n")) {
+    return `"""${content.replace(/"""/g, '\\"\\"\\"')}"""`;
+  }
+  return JSON.stringify(content);
+}
+
+// Map a JSON-Schema property type to a Python type hint.
+function pyType(type: string | undefined): string {
+  switch (type) {
+    case "integer":
+      return "int";
+    case "number":
+      return "float";
+    case "boolean":
+      return "bool";
+    case "array":
+      return "list";
+    case "object":
+      return "dict";
+    default:
+      return "str";
+  }
 }
 
 function generateTypeName(funcName: string): string {
@@ -19,210 +57,198 @@ function generateTypeName(funcName: string): string {
   );
 }
 
-function generateTypeDefinition(func: FlowFunctionJson): string {
+function hasProperties(func: AnyFunction): boolean {
+  return Object.keys(func.properties || {}).length > 0;
+}
+
+// Result types are emitted as plain TypedDicts. `FlowResult` is deprecated in
+// pipecat-flows 1.x: handlers may return any JSON-serializable value.
+function generateTypeDefinition(func: AnyFunction): string {
   const typeName = generateTypeName(func.name);
   const props = func.properties || {};
 
-  if (Object.keys(props).length === 0) {
-    // No properties, use base FlowResult
-    return "";
-  }
+  const fields = Object.entries(props).map(([key, prop]) => `    ${key}: ${pyType(prop.type)}`);
 
-  const fields = Object.entries(props).map(([key, prop]) => {
-    const pyType =
-      prop.type === "integer"
-        ? "int"
-        : prop.type === "number"
-          ? "float"
-          : prop.type === "boolean"
-            ? "bool"
-            : "str";
-    const optional = func.required?.includes(key) ? "" : " | None";
-    return `    ${key}: ${pyType}${optional}`;
-  });
-
-  return `class ${typeName}(FlowResult):
-    """Result type for ${func.name} function"""
-${fields.join("\n")}
-`;
+  return `class ${typeName}(TypedDict):
+    """Result type for the ${func.name} function."""
+${fields.join("\n")}`;
 }
 
 function formatMessage(msg: MessageJson): string {
-  // Use triple quotes for multiline content, regular quotes for single line
-  const contentLines = msg.content.split("\n");
-  const hasNewlines = contentLines.length > 1;
-  const contentStr = hasNewlines
-    ? `"""${msg.content.replace(/"""/g, '\\"\\"\\"')}"""`
-    : JSON.stringify(msg.content);
-  return `            {\n                "role": "${msg.role}",\n                "content": ${contentStr}\n            }`;
+  const contentStr = pythonStringLiteral(msg.content);
+  return `            {\n                "role": "${msg.role}",\n                "content": ${contentStr},\n            }`;
 }
 
-function formatProperty(prop: any, indent: string = "            "): string {
+// Build the docstring `Args:` description for a single parameter, folding any
+// JSON-Schema constraints (enum/min/max/pattern) into prose. Direct functions
+// derive their schema from type hints + docstring, so constraints have no other
+// place to live.
+function buildArgDescription(prop: {
+  description?: string;
+  enum?: (string | number)[];
+  minimum?: number;
+  maximum?: number;
+  pattern?: string;
+}): string {
   const parts: string[] = [];
-  if (prop.type) parts.push(`"type": "${prop.type}"`);
-  if (prop.description) parts.push(`"description": "${escapePythonString(prop.description)}"`);
-  if (prop.enum) parts.push(`"enum": ${JSON.stringify(prop.enum)}`);
-  if (prop.minimum !== undefined) parts.push(`"minimum": ${prop.minimum}`);
-  if (prop.maximum !== undefined) parts.push(`"maximum": ${prop.maximum}`);
-  if (prop.pattern) parts.push(`"pattern": "${escapePythonString(prop.pattern)}"`);
-  return `{\n${indent}    ${parts.join(`,\n${indent}    `)}\n${indent}}`;
+  if (prop.description) {
+    let d = prop.description.trim();
+    if (d && !/[.!?]$/.test(d)) d += ".";
+    parts.push(d);
+  }
+  if (prop.enum && prop.enum.length > 0) {
+    const values = prop.enum.map((v) => (typeof v === "string" ? `"${v}"` : v)).join(", ");
+    parts.push(`Allowed values: ${values}.`);
+  }
+  if (prop.minimum !== undefined) parts.push(`Minimum: ${prop.minimum}.`);
+  if (prop.maximum !== undefined) parts.push(`Maximum: ${prop.maximum}.`);
+  if (prop.pattern) parts.push(`Must match the pattern: ${prop.pattern}.`);
+  return parts.join(" ").trim() || "...";
 }
 
-function generateFunction(func: FlowFunctionJson): {
-  handler: string;
-  schema: string;
-  typeDef?: string;
-} {
-  const funcName = func.name;
-  const handlerName = `handle_${funcName}`;
+// Build the full docstring block (already indented one level into the function
+// body). The summary becomes the tool description; the `Args:` section
+// describes each parameter for the LLM.
+function buildDocstring(func: AnyFunction): string {
+  const raw = (func.description || "").trim() || `Handle the ${func.name} function.`;
+  const description = escapeTripleQuotes(raw);
   const props = func.properties || {};
-  const required = func.required || [];
-  const typeName = generateTypeName(funcName);
-  const hasType = Object.keys(props).length > 0;
+  const keys = Object.keys(props);
 
-  // FlowsFunctionSchema requires properties and required to always be set
-  let propertiesBlock = "";
-  if (Object.keys(props).length > 0) {
-    const propLines = Object.entries(props).map(([key, prop]) => {
-      return `            "${key}": ${formatProperty(prop, "            ")}`;
-    });
-    propertiesBlock = `,\n        properties={\n${propLines.join(",\n")}\n        }`;
-  } else {
-    propertiesBlock = ",\n        properties={}";
+  if (keys.length === 0) {
+    if (description.includes("\n")) {
+      const body = description
+        .split("\n")
+        .map((line) => `${INDENT}${line}`)
+        .join("\n");
+      return `${INDENT}"""\n${body}\n${INDENT}"""`;
+    }
+    return `${INDENT}"""${description}"""`;
   }
 
-  const requiredBlock = `,\n        required=${JSON.stringify(required)}`;
+  const descBody = description
+    .split("\n")
+    .map((line) => `${INDENT}${line}`)
+    .join("\n");
+  const argLines = keys
+    .map(
+      (key) =>
+        `${INDENT}${INDENT}${key} (${pyType(props[key].type)}): ${escapeTripleQuotes(
+          buildArgDescription(props[key])
+        )}`
+    )
+    .join("\n");
 
-  // Generate schema code (used for both decision and non-decision functions)
-  const schemaCode = `    ${funcName}_func = FlowsFunctionSchema(
-        name="${funcName}",
-        handler=handle_${funcName},
-        description="${escapePythonString(func.description)}"${propertiesBlock}${requiredBlock}
-    )`;
+  return `${INDENT}"""\n${descBody}\n\n${INDENT}Args:\n${argLines}\n${INDENT}"""`;
+}
 
-  // Generate type definition (used for both decision and non-decision functions)
-  const typeDefCode = hasType ? generateTypeDefinition(func) : undefined;
+// Build the typed parameter list that follows `flow_manager` in a direct
+// function signature, e.g. ", size: int, party_size: int".
+function buildParams(func: AnyFunction): string {
+  const props = func.properties || {};
+  return Object.entries(props)
+    .map(([key, prop]) => `, ${key}: ${pyType(prop.type)}`)
+    .join("");
+}
 
-  // Generate typed argument extraction
-  const argExtraction =
-    Object.keys(props).length > 0
-      ? Object.entries(props)
-          .map(([key, prop]) => {
-            const pyType =
-              prop.type === "integer"
-                ? "int"
-                : prop.type === "number"
-                  ? "float"
-                  : prop.type === "boolean"
-                    ? "bool"
-                    : "str";
-            const defaultValue =
-              prop.type === "integer" || prop.type === "number"
-                ? "0"
-                : prop.type === "boolean"
-                  ? "False"
-                  : '""';
-            return `        ${key}: ${pyType} = args.get("${key}", ${defaultValue})`;
-          })
-          .join("\n") + "\n"
-      : "";
+// True when a function overrides any @flows_tool_options default.
+function usesToolOptions(func: AnyFunction): boolean {
+  return Boolean(func.cancel_on_interruption) || func.timeout_secs != null;
+}
 
-  let nextNodeRouting: string;
-  let decisionCode = "";
+// Build the optional `@flows_tool_options(...)` decorator line (with a trailing
+// newline), or an empty string when the call options are left at their defaults.
+function buildToolOptionsDecorator(func: AnyFunction): string {
+  if (!usesToolOptions(func)) return "";
+  const opts: string[] = [];
+  if (func.cancel_on_interruption) opts.push("cancel_on_interruption=True");
+  if (func.timeout_secs != null) opts.push(`timeout_secs=${func.timeout_secs}`);
+  return `@flows_tool_options(${opts.join(", ")})\n`;
+}
 
-  // Handle decision logic
+// Generate a single direct function. Works for both node functions (which may
+// route to a next node or branch via a decision) and global functions (no
+// routing). The schema is extracted automatically by pipecat-flows from the
+// signature and docstring below.
+function generateDirectFunction(func: FlowFunctionJson): string {
+  const funcName = func.name;
+  const hasType = hasProperties(func);
+  const typeName = generateTypeName(funcName);
+  const params = buildParams(func);
+  const docstring = buildDocstring(func);
+  const decorator = buildToolOptionsDecorator(func);
+
+  // Decision functions: run the action block, then branch to a next node.
   if (func.decision) {
-    // Execute action code block (user must set result variable)
-    decisionCode = `        # Execute action (must set 'result' variable)\n${func.decision.action
+    let body = `${INDENT}# Execute action (must set the 'result' variable)\n${func.decision.action
       .split("\n")
-      .map((line) => `        ${line}`)
+      .map((line) => `${INDENT}${line}`)
       .join("\n")}\n\n`;
 
-    // Generate if/elif/else chain if there are conditions
     if (func.decision.conditions.length > 0) {
-      decisionCode += "        # Conditional routing\n";
+      body += `${INDENT}# Conditional routing\n`;
       func.decision.conditions.forEach((condition, index) => {
-        const indent = index === 0 ? "if" : "elif";
-        // Handle special operators like "not", "in", "not in"
+        const keyword = index === 0 ? "if" : "elif";
         let conditionExpr: string;
         if (condition.operator === "not") {
-          conditionExpr = `not result`;
+          conditionExpr = "not result";
         } else if (condition.operator === "in") {
           conditionExpr = `result in ${condition.value}`;
         } else if (condition.operator === "not in") {
           conditionExpr = `result not in ${condition.value}`;
         } else {
-          // For comparison operators, try to parse value as appropriate type
-          // For now, keep as string comparison - user can wrap in quotes if needed
           conditionExpr = `result ${condition.operator} ${condition.value}`;
         }
-        decisionCode += `        ${indent} ${conditionExpr}:\n            return result, create_${condition.next_node_id}_node()\n`;
+        body += `${INDENT}${keyword} ${conditionExpr}:\n${INDENT}${INDENT}return result, create_${condition.next_node_id}_node()\n`;
       });
-      decisionCode += `        else:\n            return result, create_${func.decision.default_next_node_id}_node()\n`;
+      body += `${INDENT}else:\n${INDENT}${INDENT}return result, create_${func.decision.default_next_node_id}_node()`;
     } else {
-      // No conditions, just return default
-      decisionCode += `        return result, create_${func.decision.default_next_node_id}_node()\n`;
+      body += `${INDENT}return result, create_${func.decision.default_next_node_id}_node()`;
     }
 
-    // Return type for decision: result is Any (action result)
-    const returnTypeAnnotation = `tuple[Any, NodeConfig]`;
-
-    const handlerCode = `
-    async def ${handlerName}(args: FlowArgs, flow_manager: FlowManager) -> ${returnTypeAnnotation}:
-        """Handler for ${funcName} function"""
-${argExtraction}${decisionCode}
-`;
-
-    return {
-      handler: handlerCode,
-      schema: schemaCode,
-      typeDef: typeDefCode,
-    };
+    return `${decorator}async def ${funcName}(flow_manager: FlowManager${params}) -> tuple[Any, NodeConfig]:
+${docstring}
+${body}`;
   }
 
-  // Original logic for non-decision functions
-  if (!hasType) {
-    // No properties, return None
-    if (func.next_node_id) {
-      nextNodeRouting = `        return None, create_${func.next_node_id}_node()`;
-    } else {
-      nextNodeRouting = "        return None, None";
-    }
-  } else {
-    // Has properties, use named parameters
-    const namedParams = Object.keys(props)
+  // Plain functions: optionally produce a result and route to a next node.
+  const resultType = hasType ? typeName : "None";
+  const nextType = func.next_node_id ? "NodeConfig" : "None";
+
+  let resultValue: string;
+  if (hasType) {
+    const namedParams = Object.keys(func.properties || {})
       .map((key) => `${key}=${key}`)
       .join(", ");
-    if (func.next_node_id) {
-      nextNodeRouting = `        return ${typeName}(${namedParams}), create_${func.next_node_id}_node()`;
-    } else {
-      nextNodeRouting = `        return ${typeName}(${namedParams}), None`;
-    }
+    resultValue = `${typeName}(${namedParams})`;
+  } else {
+    resultValue = "None";
   }
+  const nextValue = func.next_node_id ? `create_${func.next_node_id}_node()` : "None";
 
-  // Generate return type annotation
-  // If no type, return type is just None (not None | None)
-  const firstType = hasType ? `${typeName} | None` : "None";
-  const returnTypeAnnotation = func.next_node_id
-    ? `tuple[${firstType}, NodeConfig]`
-    : `tuple[${firstType}, NodeConfig | None]`;
-
-  const handlerCode = `
-    async def ${handlerName}(args: FlowArgs, flow_manager: FlowManager) -> ${returnTypeAnnotation}:
-        """Handler for ${funcName} function"""
-${argExtraction}        # TODO: Implement function logic
-        # Update flow_manager.state as needed
-${nextNodeRouting}
-`;
-
-  return {
-    handler: handlerCode,
-    schema: schemaCode,
-    typeDef: typeDefCode,
-  };
+  return `${decorator}async def ${funcName}(flow_manager: FlowManager${params}) -> tuple[${resultType}, ${nextType}]:
+${docstring}
+${INDENT}# TODO: Implement function logic
+${INDENT}# Update flow_manager.state as needed
+${INDENT}return ${resultValue}, ${nextValue}`;
 }
 
-function generateNodeFunction(node: FlowNodeJson): { nodeCode: string; typeDefs: string[] } {
+function formatActions(actions: { type: string; handler?: string; text?: string }[]): string {
+  const actionStrs = actions.map((action) => {
+    if (action.type === "end_conversation") {
+      return `            {"type": "end_conversation"}`;
+    } else if (action.type === "function" && action.handler) {
+      return `            {"type": "function", "handler": ${action.handler}}`;
+    } else if (action.type === "tts_say" && action.text) {
+      return `            {"type": "tts_say", "text": "${escapePythonString(action.text)}"}`;
+    }
+    return `            {"type": "${action.type}"}`;
+  });
+  return actionStrs.join(",\n");
+}
+
+// Generate the create_<id>_node() factory for a single node.
+function generateNodeFactory(node: FlowNodeJson): string {
   const nodeId = node.id;
   const data = node.data || {};
 
@@ -232,41 +258,20 @@ function generateNodeFunction(node: FlowNodeJson): { nodeCode: string; typeDefs:
   const preActions = data.pre_actions || [];
   const postActions = data.post_actions || [];
   const contextStrategy = data.context_strategy as
-    | { strategy: "APPEND" | "RESET" | "RESET_WITH_SUMMARY"; summary_prompt?: string } // RESET_WITH_SUMMARY deprecated in 1.0
+    | { strategy: "APPEND" | "RESET" | "RESET_WITH_SUMMARY"; summary_prompt?: string }
     | undefined;
 
   let code = `def create_${nodeId}_node() -> NodeConfig:
     """Create the ${data.label || nodeId} node."""
+    return NodeConfig(
+        name="${nodeId}",
 `;
 
-  // Generate function handlers and collect type definitions
-  const functionHandlers: string[] = [];
-  const functionSchemas: string[] = [];
-  const functionRefs: string[] = [];
-  const typeDefs: string[] = [];
-
-  functions.forEach((func) => {
-    const funcGen = generateFunction(func);
-    if (funcGen.typeDef) {
-      typeDefs.push(funcGen.typeDef);
-    }
-    functionHandlers.push(funcGen.handler);
-    functionSchemas.push(funcGen.schema);
-    functionRefs.push(`${func.name}_func`);
-  });
-
-  if (functionHandlers.length > 0) {
-    code += functionHandlers.join("\n");
-    code += "\n";
-    code += functionSchemas.join("\n");
-    code += "\n";
-  }
-
-  code += `    return NodeConfig(
-        name="${nodeId}",\n`;
-
+  // `role_message` (str) replaces the deprecated `role_messages` (list). Collapse
+  // any role messages into a single system instruction string.
   if (roleMessages.length > 0) {
-    code += `        role_messages=[\n${roleMessages.map(formatMessage).join(",\n")}\n        ],\n`;
+    const roleContent = roleMessages.map((m) => m.content).join("\n\n");
+    code += `        role_message=${pythonStringLiteral(roleContent)},\n`;
   }
 
   if (taskMessages.length > 0) {
@@ -274,35 +279,15 @@ function generateNodeFunction(node: FlowNodeJson): { nodeCode: string; typeDefs:
   }
 
   if (functions.length > 0) {
-    code += `        functions=[${functionRefs.join(", ")}],\n`;
+    code += `        functions=[${functions.map((f) => f.name).join(", ")}],\n`;
   }
 
   if (preActions.length > 0) {
-    const actionStrs = preActions.map((action) => {
-      if (action.type === "end_conversation") {
-        return `            {"type": "end_conversation"}`;
-      } else if (action.type === "function" && action.handler) {
-        return `            {"type": "function", "handler": ${action.handler}}`;
-      } else if (action.type === "tts_say" && action.text) {
-        return `            {"type": "tts_say", "text": "${escapePythonString(action.text)}"}`;
-      }
-      return `            {"type": "${action.type}"}`;
-    });
-    code += `        pre_actions=[\n${actionStrs.join(",\n")}\n        ],\n`;
+    code += `        pre_actions=[\n${formatActions(preActions)}\n        ],\n`;
   }
 
   if (postActions.length > 0) {
-    const actionStrs = postActions.map((action) => {
-      if (action.type === "end_conversation") {
-        return `            {"type": "end_conversation"}`;
-      } else if (action.type === "function" && action.handler) {
-        return `            {"type": "function", "handler": ${action.handler}}`;
-      } else if (action.type === "tts_say" && action.text) {
-        return `            {"type": "tts_say", "text": "${escapePythonString(action.text)}"}`;
-      }
-      return `            {"type": "${action.type}"}`;
-    });
-    code += `        post_actions=[\n${actionStrs.join(",\n")}\n        ],\n`;
+    code += `        post_actions=[\n${formatActions(postActions)}\n        ],\n`;
   }
 
   if (contextStrategy && contextStrategy.strategy !== "APPEND") {
@@ -310,182 +295,135 @@ function generateNodeFunction(node: FlowNodeJson): { nodeCode: string; typeDefs:
       const summaryPrompt = contextStrategy.summary_prompt
         ? escapePythonString(contextStrategy.summary_prompt)
         : "";
-      code += `        context_strategy=ContextStrategyConfig(\n            strategy=ContextStrategy.${contextStrategy.strategy},\n            summary_prompt="${summaryPrompt}"\n        ),\n`;
+      code += `        context_strategy=ContextStrategyConfig(\n            strategy=ContextStrategy.${contextStrategy.strategy},\n            summary_prompt="${summaryPrompt}",\n        ),\n`;
     } else {
       code += `        context_strategy=ContextStrategyConfig(\n            strategy=ContextStrategy.${contextStrategy.strategy}\n        ),\n`;
     }
   }
 
-  // Only include respond_immediately if it's False (True is the default)
-  const respondImmediately = data.respond_immediately !== false;
-  if (!respondImmediately) {
+  // respond_immediately defaults to True; only emit it when False.
+  if (data.respond_immediately === false) {
     code += `        respond_immediately=False,\n`;
   }
 
   code += `    )`;
 
-  return { nodeCode: code, typeDefs };
-}
-
-function generateGlobalFunctions(flow: FlowJson): string {
-  const globalFuncs = flow.global_functions || [];
-  if (globalFuncs.length === 0) return "";
-
-  let code = "\n# Global functions\n";
-  globalFuncs.forEach((func) => {
-    const props = func.properties || {};
-    const required = func.required || [];
-    const hasType = Object.keys(props).length > 0;
-    const typeName = hasType ? generateTypeName(func.name) : "FlowResult";
-    const handlerName = `handle_${func.name}`;
-
-    // FlowsFunctionSchema requires properties and required to always be set
-    let propertiesBlock = "";
-    if (Object.keys(props).length > 0) {
-      const propLines = Object.entries(props).map(([key, prop]) => {
-        return `            "${key}": ${formatProperty(prop, "            ")}`;
-      });
-      propertiesBlock = `,\n        properties={\n${propLines.join(",\n")}\n        }`;
-    } else {
-      propertiesBlock = ",\n        properties={}";
-    }
-
-    const requiredBlock = `,\n        required=${JSON.stringify(required)}`;
-
-    const argExtraction =
-      Object.keys(props).length > 0
-        ? Object.entries(props)
-            .map(([key, prop]) => {
-              const pyType =
-                prop.type === "integer"
-                  ? "int"
-                  : prop.type === "number"
-                    ? "float"
-                    : prop.type === "boolean"
-                      ? "bool"
-                      : "str";
-              const defaultValue =
-                prop.type === "integer" || prop.type === "number"
-                  ? "0"
-                  : prop.type === "boolean"
-                    ? "False"
-                    : '""';
-              return `        ${key}: ${pyType} = args.get("${key}", ${defaultValue})`;
-            })
-            .join("\n") + "\n"
-        : "";
-
-    // Generate result creation with named parameters
-    let resultReturn: string;
-    let returnTypeAnnotation: string;
-    if (!hasType) {
-      resultReturn = "        return None, None";
-      returnTypeAnnotation = "tuple[None, None]";
-    } else {
-      const namedParams = Object.keys(props)
-        .map((key) => `${key}=${key}`)
-        .join(", ");
-      resultReturn = `        return ${typeName}(${namedParams}), None`;
-      // For functions with types, return type can be the type or None
-      returnTypeAnnotation = `tuple[${typeName} | None, None]`;
-    }
-
-    code += `async def ${handlerName}(args: FlowArgs, flow_manager: FlowManager) -> ${returnTypeAnnotation}:
-    """Global function: ${func.name}"""
-${argExtraction}    # TODO: Implement ${func.name}
-${resultReturn}
-
-${func.name}_func = FlowsFunctionSchema(
-    name="${func.name}",
-    handler=${handlerName},
-    description="${escapePythonString(func.description)}"${propertiesBlock}${requiredBlock}
-)
-
-`;
-  });
-
   return code;
 }
 
 export function generatePythonCode(flow: FlowJson): string {
-  // Check if any node uses context_strategy
-  const hasContextStrategy = flow.nodes.some(
+  const nodes = flow.nodes || [];
+  const globalFuncs = flow.global_functions || [];
+  const initialNode = nodes.find((n) => n.type === "initial");
+  const initialNodeId = initialNode?.id || nodes[0]?.id || "initial";
+
+  // Determine which optional imports are needed.
+  const hasContextStrategy = nodes.some(
     (node) => node.data?.context_strategy && node.data.context_strategy.strategy !== "APPEND"
   );
+  const allNodeFunctions = nodes.flatMap(
+    (node) => (node.data?.functions as FlowFunctionJson[] | undefined) || []
+  );
+  const hasDecision = allNodeFunctions.some((func) => func.decision !== undefined);
 
-  // Check if any function has a decision (needs Any type)
-  const hasDecision = flow.nodes.some((node) => {
-    const functions = (node.data?.functions as FlowFunctionJson[] | undefined) || [];
-    return functions.some((func) => func.decision !== undefined);
-  });
-
-  const nodes = flow.nodes || [];
-  const initialNode = nodes.find((n) => n.type === "initial");
-  const globalFuncs = flow.global_functions || [];
-
-  // Collect all type definitions first
-  const allTypeDefs = new Set<string>();
-  const nodeFunctions: { nodeCode: string; typeDefs: string[] }[] = [];
-
-  nodes.forEach((node) => {
-    const funcGen = generateNodeFunction(node);
-    funcGen.typeDefs.forEach((td) => allTypeDefs.add(td));
-    nodeFunctions.push(funcGen);
-  });
-
-  // Generate global function types
-  globalFuncs.forEach((func) => {
-    const props = func.properties || {};
-    if (Object.keys(props).length > 0) {
-      allTypeDefs.add(generateTypeDefinition(func));
+  // Collect result TypedDefs, de-duplicated by type name (first occurrence wins,
+  // matching the function-body dedup below; globals come first). Decision
+  // functions return `Any` (the action's `result`), so they get no result type.
+  const typeDefs = new Map<string, string>();
+  for (const func of [...globalFuncs, ...allNodeFunctions]) {
+    const isDecision = "decision" in func && Boolean(func.decision);
+    const typeName = generateTypeName(func.name);
+    if (hasProperties(func) && !isDecision && !typeDefs.has(typeName)) {
+      typeDefs.set(typeName, generateTypeDefinition(func));
     }
-  });
+  }
 
-  const initialNodeId = initialNode?.id || "initial";
-  const globalFuncRefs =
-    globalFuncs.length > 0 ? globalFuncs.map((f) => `${f.name}_func`).join(", ") : "";
+  // Imports
+  const typingImports = [hasDecision ? "Any" : null, typeDefs.size > 0 ? "TypedDict" : null].filter(
+    Boolean
+  );
+  const flowsImports = ["FlowManager", "NodeConfig"];
+  if (hasContextStrategy) {
+    flowsImports.push("ContextStrategy", "ContextStrategyConfig");
+  }
+  if ([...globalFuncs, ...allNodeFunctions].some(usesToolOptions)) {
+    flowsImports.push("flows_tool_options");
+  }
 
-  let code = `"""Generated Pipecat Flow: ${flow.meta.name}
+  // Each entry below is a top-level block; blocks are joined with two blank
+  // lines (PEP 8) when assembled at the end.
+  const blocks: string[] = [];
+
+  const moduleDocstring = `"""Generated Pipecat Flow: ${flow.meta.name}
 
 This file was generated from the visual flow editor.
-Customize the function handlers to implement your flow logic.
-"""
 
-${hasDecision ? "from typing import Any\n\n" : ""}from pipecat_flows import (
-    FlowArgs,
-    FlowManager,
-    FlowResult,
-    FlowsFunctionSchema,
-    NodeConfig${hasContextStrategy ? ",\n    ContextStrategy,\n    ContextStrategyConfig" : ""},
-)
+Functions are defined as pipecat-flows "direct functions": their schemas are
+extracted automatically from each function's signature and docstring. Fill in
+the function bodies to implement your flow logic.
+"""`;
+  blocks.push(moduleDocstring);
 
-# Type definitions
-${Array.from(allTypeDefs).join("\n")}
+  let importBlock = "";
+  if (typingImports.length > 0) {
+    importBlock += `from typing import ${typingImports.join(", ")}\n\n`;
+  }
+  importBlock += `from pipecat_flows import (\n${flowsImports.map((i) => `    ${i},`).join("\n")}\n)`;
+  blocks.push(importBlock);
 
-${generateGlobalFunctions(flow)}
+  // Result type definitions
+  if (typeDefs.size > 0) {
+    blocks.push(`# Type definitions\n${Array.from(typeDefs.values()).join("\n\n\n")}`);
+  }
 
-# Node creation functions
-`;
+  // Global functions (direct functions registered on every node).
+  if (globalFuncs.length > 0) {
+    const globals = globalFuncs
+      .map((func) => generateDirectFunction(func as FlowFunctionJson))
+      .join("\n\n\n");
+    blocks.push(`# Global functions (available at every node)\n${globals}`);
+  }
 
-  // Generate all node functions
-  nodeFunctions.forEach((funcGen) => {
-    code += funcGen.nodeCode;
-    code += "\n\n";
-  });
+  // Node functions (direct functions), grouped per node and de-duplicated by
+  // name so shared functions are defined only once. Global function names are
+  // seeded so a node function never redefines a global of the same name.
+  const emitted = new Set<string>(globalFuncs.map((f) => f.name));
+  for (const node of nodes) {
+    const functions = (node.data?.functions as FlowFunctionJson[] | undefined) || [];
+    const fresh = functions.filter((func) => !emitted.has(func.name));
+    if (fresh.length === 0) continue;
+    const label = node.data?.label || node.id;
+    const groupFns = fresh
+      .map((func) => {
+        emitted.add(func.name);
+        return generateDirectFunction(func);
+      })
+      .join("\n\n\n");
+    blocks.push(`# Functions for the ${label} node\n${groupFns}`);
+  }
 
-  // Generate FlowManager initialization section (commented)
-  code += `# FlowManager Setup
-# 
-# Initialize the FlowManager in your bot setup:
+  // Node creation functions
+  blocks.push(`# Node creation functions\n${nodes.map(generateNodeFactory).join("\n\n\n")}`);
+
+  // FlowManager setup (commented scaffold).
+  const globalFuncRefs = globalFuncs.map((f) => f.name).join(", ");
+  const globalFuncsLine =
+    globalFuncs.length > 0
+      ? `#         global_functions=[${globalFuncRefs}],`
+      : `#         # global_functions=[...],`;
+
+  blocks.push(`# FlowManager Setup
+#
+# Wire the generated nodes into your Pipecat bot:
 #
 # async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 #     stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
 #     tts = CartesiaTTSService(api_key=os.getenv("CARTESIA_API_KEY"))
-#     llm = create_llm()  # Your LLM service
-#     
+#     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
+#
 #     context = LLMContext()
 #     context_aggregator = LLMContextAggregatorPair(context)
-#     
+#
 #     pipeline = Pipeline([
 #         transport.input(),
 #         stt,
@@ -495,24 +433,26 @@ ${generateGlobalFunctions(flow)}
 #         transport.output(),
 #         context_aggregator.assistant(),
 #     ])
-#     
-#     task = PipelineTask(pipeline, params=PipelineParams(allow_interruptions=True))
-#     
-#     # Initialize FlowManager
+#
+#     worker = PipelineWorker(pipeline, params=PipelineParams(enable_metrics=True))
+#
+#     # Initialize the FlowManager
 #     flow_manager = FlowManager(
-#         task=task,
+#         worker=worker,
 #         llm=llm,
 #         context_aggregator=context_aggregator,
 #         transport=transport,
-#         # global_functions=[${globalFuncRefs}],
+${globalFuncsLine}
 #     )
-#     
+#
 #     @transport.event_handler("on_client_connected")
 #     async def on_client_connected(transport, client):
-#         logger.info("Client connected")
-#         # Start the flow with the initial node
+#         # Kick off the conversation with the initial node
 #         await flow_manager.initialize(create_${initialNodeId}_node())
-`;
+#
+#     runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+#     await runner.add_workers(worker)
+#     await runner.run()`);
 
-  return code;
+  return blocks.join("\n\n\n") + "\n";
 }

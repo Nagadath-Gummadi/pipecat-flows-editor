@@ -56,7 +56,7 @@ export const Decision = Type.Object({
   decision_node_position: Type.Optional(Type.Object({ x: Type.Number(), y: Type.Number() })), // Optional position for the decision node visualization
 });
 
-// FlowsFunctionSchema structure
+// Function definition (mapped to a pipecat-flows direct function on export)
 export const FlowFunction = Type.Object({
   name: Type.String({ minLength: 1 }),
   description: Type.String(),
@@ -64,6 +64,9 @@ export const FlowFunction = Type.Object({
   required: Type.Optional(Type.Array(Type.String())),
   next_node_id: Type.Optional(Type.String()), // Next node ID this function routes to (or default when decision exists)
   decision: Type.Optional(Decision), // Optional decision for conditional routing
+  // @flows_tool_options call options (omitted when left at their defaults)
+  cancel_on_interruption: Type.Optional(Type.Boolean()), // Cancel this call when the user interrupts (default: false)
+  timeout_secs: Type.Optional(Type.Number({ exclusiveMinimum: 0 })), // Per-tool timeout override in seconds (must be > 0)
 });
 
 // Pre/Post action structure
@@ -131,6 +134,9 @@ export const GlobalFunction = Type.Object({
   description: Type.String(),
   properties: Type.Optional(Type.Record(Type.String(), FunctionProperty)),
   required: Type.Optional(Type.Array(Type.String())),
+  // @flows_tool_options call options (omitted when left at their defaults)
+  cancel_on_interruption: Type.Optional(Type.Boolean()),
+  timeout_secs: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 });
 
 export const FlowSchema = Type.Object({
