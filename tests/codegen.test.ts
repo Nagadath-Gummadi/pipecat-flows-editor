@@ -251,4 +251,68 @@ describe("escaping and de-duplication", () => {
     const defs = code.match(/^async def shared\(/gm) ?? [];
     expect(defs.length).toBe(1);
   });
+
+  it("escapes backslashes so escape-like sequences stay valid Python", () => {
+    const flow: FlowJson = {
+      meta: { name: "Backslash Flow", version: "0.1.0" },
+      nodes: [
+        {
+          id: "start",
+          type: "initial",
+          position: { x: 0, y: 0 },
+          data: {
+            label: "Start",
+            task_messages: [{ role: "developer", content: "Hi." }],
+            functions: [{ name: "do_work", description: "Matches \\d+ and \\u escapes." }],
+          },
+        },
+      ],
+      edges: [],
+    };
+    const code = generatePythonCode(flow);
+    // Backslashes are doubled so e.g. \u can't form an invalid Python escape.
+    expect(code).toContain("Matches \\\\d+ and \\\\u escapes.");
+  });
+});
+
+describe("optional parameters honor the required list", () => {
+  const flow: FlowJson = {
+    meta: { name: "Optional Flow", version: "0.1.0" },
+    nodes: [
+      {
+        id: "start",
+        type: "initial",
+        position: { x: 0, y: 0 },
+        data: {
+          label: "Start",
+          task_messages: [{ role: "developer", content: "Hi." }],
+          functions: [
+            {
+              name: "submit",
+              description: "Submit the form.",
+              properties: {
+                note: { type: "string", description: "An optional note." },
+                name: { type: "string", description: "The user's name." },
+              },
+              required: ["name"],
+            },
+          ],
+        },
+      },
+    ],
+    edges: [],
+  };
+
+  it("orders required params first and defaults optional ones to None", () => {
+    const code = generatePythonCode(flow);
+    expect(code).toContain(
+      "async def submit(flow_manager: FlowManager, name: str, note: str | None = None) -> tuple[SubmitResult, None]:"
+    );
+  });
+
+  it("marks optional fields nullable in the result TypedDict", () => {
+    const code = generatePythonCode(flow);
+    expect(code).toContain("    name: str\n");
+    expect(code).toContain("    note: str | None\n");
+  });
 });

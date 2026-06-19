@@ -14,17 +14,28 @@ function escapePythonString(str: string): string {
   return str.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
 }
 
-// Escape triple-quote sequences so user-provided text can't prematurely close a
-// """...""" docstring.
+// Escape user text for safe embedding inside a """...""" string, preserving
+// newlines. Backslashes are escaped first (so sequences like \u can't form an
+// invalid Python escape and a trailing \ can't escape the closing quote); then
+// any """ run is escaped so it can't close the string early. Interior single
+// quotes are left untouched for readability.
 function escapeTripleQuotes(str: string): string {
-  return str.replace(/"""/g, '\\"\\"\\"');
+  return str.replace(/\\/g, "\\\\").replace(/"""/g, '\\"\\"\\"');
+}
+
+// When escaped content sits immediately before a closing """, a trailing " (or
+// "") would merge into """" and break the literal. Escape a trailing quote so
+// the delimiter stays unambiguous. (Not needed when a newline separates the
+// content from the closing delimiter.)
+function guardTrailingQuote(str: string): string {
+  return str.endsWith('"') ? `${str.slice(0, -1)}\\"` : str;
 }
 
 // Render a string as a Python literal: triple-quoted when it spans multiple
 // lines, otherwise a regular double-quoted string.
 function pythonStringLiteral(content: string): string {
   if (content.includes("\n")) {
-    return `"""${content.replace(/"""/g, '\\"\\"\\"')}"""`;
+    return `"""${guardTrailingQuote(escapeTripleQuotes(content))}"""`;
   }
   return JSON.stringify(content);
 }
@@ -61,13 +72,29 @@ function hasProperties(func: AnyFunction): boolean {
   return Object.keys(func.properties || {}).length > 0;
 }
 
+// Order a function's properties with required ones first. This keeps the
+// generated signature valid (parameters with defaults must follow those
+// without) and ensures the signature, docstring, result type, and result value
+// all agree on ordering.
+function orderedKeys(func: AnyFunction): { key: string; required: boolean }[] {
+  const keys = Object.keys(func.properties || {});
+  const required = new Set(func.required || []);
+  return [...keys.filter((k) => required.has(k)), ...keys.filter((k) => !required.has(k))].map(
+    (key) => ({ key, required: required.has(key) })
+  );
+}
+
 // Result types are emitted as plain TypedDicts. `FlowResult` is deprecated in
-// pipecat-flows 1.x: handlers may return any JSON-serializable value.
+// pipecat-flows 1.x: handlers may return any JSON-serializable value. Optional
+// (non-required) inputs are nullable, matching their `| None = None` defaults.
 function generateTypeDefinition(func: AnyFunction): string {
   const typeName = generateTypeName(func.name);
   const props = func.properties || {};
 
-  const fields = Object.entries(props).map(([key, prop]) => `    ${key}: ${pyType(prop.type)}`);
+  const fields = orderedKeys(func).map(({ key, required }) => {
+    const t = pyType(props[key].type);
+    return `    ${key}: ${required ? t : `${t} | None`}`;
+  });
 
   return `class ${typeName}(TypedDict):
     """Result type for the ${func.name} function."""
@@ -130,9 +157,9 @@ function buildDocstring(func: AnyFunction): string {
     .split("\n")
     .map((line) => `${INDENT}${line}`)
     .join("\n");
-  const argLines = keys
+  const argLines = orderedKeys(func)
     .map(
-      (key) =>
+      ({ key }) =>
         `${INDENT}${INDENT}${key} (${pyType(props[key].type)}): ${escapeTripleQuotes(
           buildArgDescription(props[key])
         )}`
@@ -143,11 +170,16 @@ function buildDocstring(func: AnyFunction): string {
 }
 
 // Build the typed parameter list that follows `flow_manager` in a direct
-// function signature, e.g. ", size: int, party_size: int".
+// function signature, e.g. ", size: int, party_size: int". Non-required
+// properties become optional parameters (`name: type | None = None`) so the
+// derived tool schema marks them optional too.
 function buildParams(func: AnyFunction): string {
   const props = func.properties || {};
-  return Object.entries(props)
-    .map(([key, prop]) => `, ${key}: ${pyType(prop.type)}`)
+  return orderedKeys(func)
+    .map(({ key, required }) => {
+      const t = pyType(props[key].type);
+      return required ? `, ${key}: ${t}` : `, ${key}: ${t} | None = None`;
+    })
     .join("");
 }
 
@@ -170,7 +202,7 @@ function buildToolOptionsDecorator(func: AnyFunction): string {
 // route to a next node or branch via a decision) and global functions (no
 // routing). The schema is extracted automatically by pipecat-flows from the
 // signature and docstring below.
-function generateDirectFunction(func: FlowFunctionJson): string {
+function generateDirectFunction(func: AnyFunction): string {
   const funcName = func.name;
   const hasType = hasProperties(func);
   const typeName = generateTypeName(funcName);
@@ -178,16 +210,20 @@ function generateDirectFunction(func: FlowFunctionJson): string {
   const docstring = buildDocstring(func);
   const decorator = buildToolOptionsDecorator(func);
 
+  // Routing fields only exist on node functions; global functions have neither.
+  const decision = "decision" in func ? func.decision : undefined;
+  const nextNodeId = "next_node_id" in func ? func.next_node_id : undefined;
+
   // Decision functions: run the action block, then branch to a next node.
-  if (func.decision) {
-    let body = `${INDENT}# Execute action (must set the 'result' variable)\n${func.decision.action
+  if (decision) {
+    let body = `${INDENT}# Execute action (must set the 'result' variable)\n${decision.action
       .split("\n")
       .map((line) => `${INDENT}${line}`)
       .join("\n")}\n\n`;
 
-    if (func.decision.conditions.length > 0) {
+    if (decision.conditions.length > 0) {
       body += `${INDENT}# Conditional routing\n`;
-      func.decision.conditions.forEach((condition, index) => {
+      decision.conditions.forEach((condition, index) => {
         const keyword = index === 0 ? "if" : "elif";
         let conditionExpr: string;
         if (condition.operator === "not") {
@@ -201,9 +237,9 @@ function generateDirectFunction(func: FlowFunctionJson): string {
         }
         body += `${INDENT}${keyword} ${conditionExpr}:\n${INDENT}${INDENT}return result, create_${condition.next_node_id}_node()\n`;
       });
-      body += `${INDENT}else:\n${INDENT}${INDENT}return result, create_${func.decision.default_next_node_id}_node()`;
+      body += `${INDENT}else:\n${INDENT}${INDENT}return result, create_${decision.default_next_node_id}_node()`;
     } else {
-      body += `${INDENT}return result, create_${func.decision.default_next_node_id}_node()`;
+      body += `${INDENT}return result, create_${decision.default_next_node_id}_node()`;
     }
 
     return `${decorator}async def ${funcName}(flow_manager: FlowManager${params}) -> tuple[Any, NodeConfig]:
@@ -213,18 +249,18 @@ ${body}`;
 
   // Plain functions: optionally produce a result and route to a next node.
   const resultType = hasType ? typeName : "None";
-  const nextType = func.next_node_id ? "NodeConfig" : "None";
+  const nextType = nextNodeId ? "NodeConfig" : "None";
 
   let resultValue: string;
   if (hasType) {
-    const namedParams = Object.keys(func.properties || {})
-      .map((key) => `${key}=${key}`)
+    const namedParams = orderedKeys(func)
+      .map(({ key }) => `${key}=${key}`)
       .join(", ");
     resultValue = `${typeName}(${namedParams})`;
   } else {
     resultValue = "None";
   }
-  const nextValue = func.next_node_id ? `create_${func.next_node_id}_node()` : "None";
+  const nextValue = nextNodeId ? `create_${nextNodeId}_node()` : "None";
 
   return `${decorator}async def ${funcName}(flow_manager: FlowManager${params}) -> tuple[${resultType}, ${nextType}]:
 ${docstring}
@@ -378,9 +414,7 @@ the function bodies to implement your flow logic.
 
   // Global functions (direct functions registered on every node).
   if (globalFuncs.length > 0) {
-    const globals = globalFuncs
-      .map((func) => generateDirectFunction(func as FlowFunctionJson))
-      .join("\n\n\n");
+    const globals = globalFuncs.map((func) => generateDirectFunction(func)).join("\n\n\n");
     blocks.push(`# Global functions (available at every node)\n${globals}`);
   }
 
