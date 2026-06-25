@@ -26,15 +26,17 @@ Use JSON if you want to plug the editor into a custom runtime, build your own ge
 
 ### Generated Python
 
-Selecting **Export → Export Python** downloads a ready-to-run scaffold:
+Selecting **Export → Export Python** downloads a ready-to-run scaffold targeting **pipecat-flows 1.3.0+**:
 
-- One `create_<node_id>_node()` function per node
-- `FlowsFunctionSchema` definitions (including Field metadata) and async handler stubs
+- One `create_<node_id>_node()` factory per node
+- [Direct functions](https://reference-flows.pipecat.ai/en/latest/) — `async def name(flow_manager, ...)` stubs whose schema is derived automatically from the type hints and docstring. JSON-Schema constraints (enum / minimum / maximum / pattern) are folded into the docstring `Args:` section.
+- Result types as plain `TypedDict`s (the deprecated `FlowResult` is no longer used)
+- A `@flows_tool_options(...)` decorator when a function sets call options (cancel-on-interruption and/or a per-tool timeout)
 - Decision routing rendered as Python `if / elif / else` blocks
 - Optional context strategy wiring (adds `ContextStrategyConfig` imports only when needed)
 - Placeholder FlowManager setup showing where to plug in your Pipecat pipeline and transport events
 
-Every handler contains TODOs for your business logic and already returns `(FlowResult | None, NodeConfig | None)` in the proper shape.
+Each direct function takes `flow_manager` first, followed by its parameters as typed arguments, and returns `(result, next_node)` — where `result` is any JSON-serializable value (or `None`) and `next_node` is the `NodeConfig` to transition to (or `None`).
 
 ## Using the Generated Python
 
@@ -49,8 +51,8 @@ pip install pipecat pipecat-ai-flows
 3. **Wire it into your Pipecat entrypoint**:
 
 ```python
+from pipecat.transports.base_transport import BaseTransport
 from pipecat_flows import FlowManager
-from pipecat_flows.transport import BaseTransport
 
 from food_ordering_flow import (
     create_initial_node,
@@ -58,7 +60,7 @@ from food_ordering_flow import (
 )
 
 flow_manager = FlowManager(
-    task=task,
+    worker=worker,  # PipelineWorker; `task=` is deprecated
     llm=llm,
     context_aggregator=context_aggregator,
     transport=transport,
@@ -70,17 +72,17 @@ async def on_client_connected(transport: BaseTransport, client):
     await flow_manager.initialize(create_initial_node())
 ```
 
-4. **Implement the handlers** generated in the file. Each handler already receives `(args, flow_manager)` so you can:
-   - Read user input or prior outputs from `args`
+4. **Implement the direct functions** generated in the file. Each receives `flow_manager` plus its typed parameters, so you can:
+   - Read the user-provided arguments directly as named parameters
    - Store intermediate data in `flow_manager.state`
-   - Decide what node to visit next (or rely on decisions/`next_node_id`)
+   - Decide what node to visit next by returning its `NodeConfig` (or rely on decisions/`next_node_id`)
 
 ### Decision Handling
 
 If a function in the editor contains a decision:
 
-- The generated handler includes the `action` block (your expression, evaluated server-side).
-- Conditions become `if/elif` checks that route to `create_<node_id>_node()` functions.
+- The generated direct function includes the `action` block (your expression, evaluated server-side) and returns `Any` as the result.
+- Conditions become `if/elif/else` checks that route to `create_<node_id>_node()` functions.
 - The editor also stores optional `decision_node_position` so re-importing Python-exported JSON maintains the layout of helper decision nodes in the UI.
 
 ## Using JSON Directly
@@ -90,11 +92,11 @@ If you prefer to consume the JSON yourself:
 | JSON Field                               | Pipecat Usage                                        |
 | ---------------------------------------- | ---------------------------------------------------- |
 | `node.id`                                | `NodeConfig.name`                                    |
-| `node.data.role_messages`                | `NodeConfig.role_messages`                           |
+| `node.data.role_messages`                | `NodeConfig.role_message` (collapsed to a string)    |
 | `node.data.task_messages`                | `NodeConfig.task_messages`                           |
-| `node.data.functions[]`                  | `FlowsFunctionSchema` definitions                    |
+| `node.data.functions[]`                  | Direct functions (auto-derived schema)               |
 | `node.data.functions[].next_node_id`     | Return value `(…, create_<id>_node())`               |
-| `node.data.functions[].decision`         | Custom logic that maps to handler code               |
+| `node.data.functions[].decision`         | Direct function body with `if/elif/else` routing     |
 | `node.data.pre_actions` / `post_actions` | Passed directly into `NodeConfig`                    |
 | `node.data.context_strategy`             | Adds `ContextStrategyConfig`                         |
 | `global_functions`                       | Optional functions registered on every node          |

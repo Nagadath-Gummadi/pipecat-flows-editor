@@ -57,7 +57,7 @@ type CommonNodeData = {
 - `label` – Display name used in the canvas/palette
 - `role_messages` – Pipecat role messages (`role` = `system` | `developer` | `user` | `assistant`, `content` = string)
 - `task_messages` – Step-specific instructions
-- `functions` – Available `FlowsFunctionSchema` entries for this node
+- `functions` – Functions available at this node (generated as pipecat-flows direct functions)
 - `pre_actions` / `post_actions` – Pipecat actions executed before/after the node
 - `context_strategy` – Controls Pipecat context accumulation (`APPEND`, `RESET`, `RESET_WITH_SUMMARY` (deprecated))
 - `respond_immediately` – Set to `false` if the node should wait before responding
@@ -72,10 +72,12 @@ type FlowFunction = {
   required?: string[];
   next_node_id?: string;
   decision?: Decision;
+  cancel_on_interruption?: boolean; // @flows_tool_options: cancel the call when the user interrupts
+  timeout_secs?: number; // @flows_tool_options: per-tool timeout override (seconds)
 };
 ```
 
-`properties` and `required` follow JSON Schema semantics and become the arguments that Pipecat hands to the function handler.
+`properties` and `required` follow JSON Schema semantics and become the arguments that Pipecat hands to the function. `cancel_on_interruption` and `timeout_secs` are emitted as a `@flows_tool_options(...)` decorator; both are omitted from the generated decorator when left at their defaults.
 
 #### FunctionProperty
 
@@ -145,7 +147,7 @@ type GlobalFunction = {
 };
 ```
 
-They become `FlowsFunctionSchema` instances registered on the `FlowManager` itself (available to every node).
+They are generated as direct functions and registered on the `FlowManager` itself via `global_functions` (available to every node).
 
 ## Edges
 

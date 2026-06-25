@@ -4,6 +4,7 @@ import { ChevronDown, ChevronRight, Plus, Trash2 } from "lucide-react";
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -51,17 +52,30 @@ export const FunctionItem = React.forwardRef<HTMLDivElement, FunctionItemProps>(
       func.next_node_id !== undefined && !availableNodeIds.includes(func.next_node_id);
     const [functionName, setFunctionName] = useState(func.name);
     const [nameError, setNameError] = useState<string | null>(null);
+    const [timeoutInput, setTimeoutInput] = useState(func.timeout_secs?.toString() ?? "");
+    const [timeoutError, setTimeoutError] = useState<string | null>(null);
     const nameInputRef = useRef<HTMLInputElement>(null);
     const [isExpanded, setIsExpanded] = useState(isSelected);
     const defaultNextNodeRef = useRef<HTMLElement | null>(null);
     const functionNameId = useId();
     const functionDescriptionId = useId();
     const nextNodeId = useId();
+    const cancelOnInterruptionId = useId();
+    const timeoutSecsId = useId();
 
     useEffect(() => {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setFunctionName(func.name);
     }, [func.name]);
+
+    // Keep the timeout input in sync when the stored value changes externally
+    // (e.g. switching the selected function, undo/redo).
+    useEffect(() => {
+      /* eslint-disable react-hooks/set-state-in-effect */
+      setTimeoutInput(func.timeout_secs?.toString() ?? "");
+      setTimeoutError(null);
+      /* eslint-enable react-hooks/set-state-in-effect */
+    }, [func.timeout_secs]);
 
     const properties = useMemo(() => func.properties ?? {}, [func.properties]);
     const required = func.required ?? [];
@@ -172,6 +186,26 @@ export const FunctionItem = React.forwardRef<HTMLDivElement, FunctionItemProps>(
           onChange({ name: formatted });
         }
       }
+    };
+
+    // Validate the per-tool timeout on every keystroke. Empty clears it (use the
+    // global default); a positive number commits; anything else shows an error
+    // and leaves the stored value untouched (mirrors the function-name field).
+    const handleTimeoutChange = (raw: string) => {
+      setTimeoutInput(raw);
+      const trimmed = raw.trim();
+      if (trimmed === "") {
+        setTimeoutError(null);
+        if (func.timeout_secs !== undefined) onChange({ timeout_secs: undefined });
+        return;
+      }
+      const parsed = Number(trimmed);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        setTimeoutError("Timeout must be a number greater than 0.");
+        return;
+      }
+      setTimeoutError(null);
+      if (func.timeout_secs !== parsed) onChange({ timeout_secs: parsed });
     };
 
     const setSelectedFunctionIndex = useEditorStore((state) => state.setSelectedFunctionIndex);
@@ -302,6 +336,43 @@ export const FunctionItem = React.forwardRef<HTMLDivElement, FunctionItemProps>(
                   ))}
                 </div>
               )}
+            </div>
+
+            {/* Call Options Section (@flows_tool_options) */}
+            <div className="pt-3 border-t border-neutral-200 dark:border-neutral-700">
+              <div className="text-xs font-medium opacity-80 mb-3">Call options</div>
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id={cancelOnInterruptionId}
+                  checked={Boolean(func.cancel_on_interruption)}
+                  onCheckedChange={(checked: boolean) =>
+                    onChange({ cancel_on_interruption: checked ? true : undefined })
+                  }
+                  onFocus={handleFocus}
+                />
+                <label
+                  htmlFor={cancelOnInterruptionId}
+                  className="text-xs opacity-60 cursor-pointer"
+                >
+                  Cancel on interruption
+                </label>
+              </div>
+              <div className="space-y-2 mt-3">
+                <label htmlFor={timeoutSecsId} className="text-xs opacity-60">
+                  Timeout (seconds)
+                </label>
+                <Input
+                  id={timeoutSecsId}
+                  type="number"
+                  step="any"
+                  className={`h-8 text-xs ${timeoutError ? "border-red-500" : ""}`}
+                  value={timeoutInput}
+                  onChange={(e) => handleTimeoutChange(e.target.value)}
+                  onFocus={handleFocus}
+                  placeholder="Use global default"
+                />
+                {timeoutError && <div className="mt-1 text-xs text-red-600">{timeoutError}</div>}
+              </div>
             </div>
 
             {/* Next Node Section */}
